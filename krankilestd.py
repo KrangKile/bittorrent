@@ -10,9 +10,6 @@ from util import even_split
 from peer import Peer
 
 class KrankileStd(Peer):
-    def post_init(self):
-        pass
-    
     def requests(self, peers, history):
         """
         peers: available info about the peers (who has what pieces)
