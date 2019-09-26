@@ -25,7 +25,7 @@ class KrankileTyrant(KrankileStd):
         # In the make use of the knowledge of the distribution of bandwidths and the assumption that the
         # other clients in the neighborhood are reference clients with 4 slots. This yields a higher bw per
         # slot which should increase likelihood of reciprocation. 
-        self.upload_bws = defaultdict(lambda: random.randint(self.conf.min_up_bw, self.conf.max_up_bw) / 3.0)
+        self.upload_bws = defaultdict(lambda: (self.conf.min_up_bw + self.conf.max_up_bw) / 6.0)
 
 
     def get_ratio(self, id_):
