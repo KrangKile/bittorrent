@@ -1,7 +1,5 @@
 #!/usr/bin/python
 
-# This is a dummy peer that just illustrates the available information your peers 
-# have available.
 
 # You'll want to copy this file to AgentNameXXX.py for various versions of XXX,
 # probably get rid of the silly logging messages, and then add more logic.
@@ -121,17 +119,28 @@ class KrankilePropshare(Peer):
         total = sum(uploader_c.values())
         
         id_and_bw = []
-    
+        #variable used to add excess bandwidth from flooring
+        not_used_float = 0
+        #calculate bandwidth distibrution
         for ele in uploader_c:
             bw = floor((uploader_c[ele]/total)*0.9*self.up_bw)
+            not_used_float += (uploader_c[ele]/total)*0.9*self.up_bw - bw
             id_and_bw.append([ele,bw])
-    
+        not_used_int = floor(not_used_float)
+
         chosen = set(x[0] for x in uploader_c)
         peer_ids = set(x.requester_id for x in requests).difference(chosen)
 
         if bool(peer_ids):
             id_and_bw.append([random.choice(list(peer_ids)),floor(self.up_bw*0.1)])
         # Evenly "split" my upload bandwidth among the one chosen requester
+        
+        id_and_bw = sorted(id_and_bw, key=itemgetter(1), reverse=True)
+        index = 0
+        while not_used_int>0:
+            id_and_bw[index % len(id_and_bw)][1] +=  1
+            index += 1
+            not_used_int -= 1
 
         # create actual uploads out of the list of peer ids and bandwidths
         uploads = [Upload(self.id, peer_id, bw) for (peer_id, bw) in id_and_bw]
