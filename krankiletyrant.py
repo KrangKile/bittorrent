@@ -45,25 +45,26 @@ class KrankileTyrant(KrankileStd):
         In each round, this will be called after requests().
         """
 
+        # Step 5 in algorithm 5.11 on page 121
         # To update the values for alpha, gamma and r before we do uploading in this round
         # should be the same as updating the values after a round.
         if history.current_round() != 0:
             # We have completed 1 round and we have history
             unchoked_ids = set(download.from_id for download in history.downloads[-1])
-            # Step 1
+            # Step 5 a)
             # Find the set of peers in the neighborhood that has not unchoked this agent
             choked_ids = set(peer.id for peer in peers).difference(unchoked_ids)
             for peer_id in choked_ids:
                 self.upload_bws[peer_id] = max(self.upload_bws[peer_id] * (1 + self.alpha), 1)
 
-            # Step 2
+            # Step 5 b)
             # A map of peers that unchoked this agent last period and how much bw we received   
             unchoked = {download.from_id: download.blocks for download in history.downloads[-1]}
             for peer_id, rate in unchoked.items():
                 # Update the estimated download rate from a peer with the actual, observed value
                 self.downloads[peer_id] = rate
 
-            # Step 3
+            # Step 5 c)
             # Initialize the set for holding the set of peers that uploaded to this agent for the last r periods
             unchoked_r_last = set(unchoked)
             for downloads in history.downloads[-self.r:-1]:
