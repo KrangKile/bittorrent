@@ -9,11 +9,15 @@
 import random
 import logging
 
+from math import floor
+from operator import itemgetter
+from itertools import chain
+from collections import Counter
 from messages import Upload, Request
 from util import even_split
 from peer import Peer
 
-class Dummy(Peer):
+class KrankilePropshare(Peer):
     def post_init(self):
         print "post_init(): %s here!" % self.id
         self.dummy_state = dict()
@@ -54,6 +58,13 @@ class Dummy(Peer):
         peers.sort(key=lambda p: p.id)
         # request all available pieces from all peers!
         # (up to self.max_requests from each)
+        piece_counter = Counter()
+        for peer in peers: 
+            av = set(peer.available_pieces)
+            av_needed = av.intersection(np_set)
+            piece_counter.update(av_needed)
+        
+            
         for peer in peers:
             av_set = set(peer.available_pieces)
             isect = av_set.intersection(np_set)
@@ -61,7 +72,9 @@ class Dummy(Peer):
             # More symmetry breaking -- ask for random pieces.
             # This would be the place to try fancier piece-requesting strategies
             # to avoid getting the same thing from multiple peers at a time.
-            for piece_id in random.sample(isect, n):
+            lisect = list(isect)
+            lisect = sorted(lisect, lambda p1,p2: piece_counter[p1] - piece_counter[p2])
+            for piece_id in lisect[:n]:
                 # aha! The peer has this piece! Request it.
                 # which part of the piece do we need next?
                 # (must get the next-needed blocks in order)
@@ -81,7 +94,7 @@ class Dummy(Peer):
 
         In each round, this will be called after requests().
         """
-
+        
         round = history.current_round()
         logging.debug("%s again.  It's round %d." % (
             self.id, round))
@@ -96,17 +109,31 @@ class Dummy(Peer):
             bws = []
             return []
 
-        logging.debug("Still here: uploading to a random peer")
-        # change my internal state for no reason
-        self.dummy_state["cake"] = "pie"
+        uploader_c = Counter()
+        last = history.downloads[-1:]
+        
+        requester_ids = set(x.requester_id for x in requests)
+        
+        for download in last[0]:
+            if download.from_id in requester_ids:
+                uploader_c.update({download.from_id: download.blocks})    
+        
+        total = sum(uploader_c.values())
+        
+        id_and_bw = []
+    
+        for ele in uploader_c:
+            bw = floor((uploader_c[ele]/total)*0.9*self.up_bw)
+            id_and_bw.append([ele,bw])
+    
+        chosen = set(x[0] for x in uploader_c)
+        peer_ids = set(x.requester_id for x in requests).difference(chosen)
 
-        request = random.choice(requests)
-        chosen = [request.requester_id]
+        if bool(peer_ids):
+            id_and_bw.append([random.choice(list(peer_ids)),floor(self.up_bw*0.1)])
         # Evenly "split" my upload bandwidth among the one chosen requester
-        bws = even_split(self.up_bw, len(chosen))
 
         # create actual uploads out of the list of peer ids and bandwidths
-        uploads = [Upload(self.id, peer_id, bw)
-                   for (peer_id, bw) in zip(chosen, bws)]
-            
+        uploads = [Upload(self.id, peer_id, bw) for (peer_id, bw) in id_and_bw]
+        
         return uploads
