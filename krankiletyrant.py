@@ -1,7 +1,8 @@
 import random
 import logging
 import math
-from collections import defaultdict
+from collections import defaultdict, Counter
+from operator import itemgetter
 
 from messages import Upload, Request
 from util import even_split
@@ -10,10 +11,12 @@ from krankilestd import KrankileStd
 
 class KrankileTyrant(KrankileStd):
     def post_init(self):
+        # Step 1 in algorithm 5.11
         self.alpha = 0.20
         self.gamma = 0.10
         self.r = 3
 
+        # Step 2 in algorithm 5.11
         # Make an initial estimate for expected download performance d_{ij}.
         # Since we cannot use the have-messages for estimation of the download capacity we can
         # get from a given peer, we instead use the knowledge of the range of different upload
@@ -25,8 +28,7 @@ class KrankileTyrant(KrankileStd):
         # In the make use of the knowledge of the distribution of bandwidths and the assumption that the
         # other clients in the neighborhood are reference clients with 4 slots. This yields a higher bw per
         # slot which should increase likelihood of reciprocation. 
-        self.upload_bws = defaultdict(lambda: (self.conf.min_up_bw + self.conf.max_up_bw) / 6.0)
-
+        self.upload_bws = defaultdict(lambda: max((self.conf.min_up_bw + self.conf.max_up_bw) / 6.0, self.up_bw / 4.0))
 
     def get_ratio(self, id_):
         return float(self.downloads[id_]) / self.upload_bws[id_]
@@ -44,29 +46,33 @@ class KrankileTyrant(KrankileStd):
 
         In each round, this will be called after requests().
         """
-
         # Step 5 in algorithm 5.11 on page 121
         # To update the values for alpha, gamma and r before we do uploading in this round
         # should be the same as updating the values after a round.
         if history.current_round() != 0:
             # We have completed 1 round and we have history
             unchoked_ids = set(download.from_id for download in history.downloads[-1])
+            
             # Step 5 a)
             # Find the set of peers in the neighborhood that has not unchoked this agent
             choked_ids = set(peer.id for peer in peers).difference(unchoked_ids)
             for peer_id in choked_ids:
-                self.upload_bws[peer_id] = self.upload_bws[peer_id] * (1 + self.alpha)
+                self.upload_bws[peer_id] = min(self.upload_bws[peer_id] * (1 + self.alpha), self.up_bw / 4.0)
 
             # Step 5 b)
             # A map of peers that unchoked this agent last period and how much bw we received   
-            unchoked = {download.from_id: download.blocks for download in history.downloads[-1]}
-            for peer_id, rate in unchoked.items():
+            unchoked_counter = Counter()
+            unchoked_list = [(download.from_id, download.blocks) for download in history.downloads[-1]]
+            for id_, blocks in unchoked_list:
+                unchoked_counter.update({id_: blocks})
+            
+            for peer_id, rate in unchoked_counter.items():
                 # Update the estimated download rate from a peer with the actual, observed value
                 self.downloads[peer_id] = float(rate)
 
             # Step 5 c)
             # Initialize the set for holding the set of peers that uploaded to this agent for the last r periods
-            unchoked_r_last = set(unchoked)
+            unchoked_r_last = set(unchoked_ids)
             for downloads in history.downloads[-self.r:-1]:
                 unchoked_r_last = unchoked_r_last.intersection(set(download.from_id for download in downloads))
             
@@ -77,7 +83,8 @@ class KrankileTyrant(KrankileStd):
         # In case there were no requests, just terminate
         if len(requests) == 0:
             return []
-
+        
+        # Step 4 in algorithm 5.11
         # Find the peers that have sent requests to this agent
         requester_ids = list(set(request.requester_id for request in requests))
         sorted_ids = sorted(requester_ids, self.sort_func)
@@ -86,12 +93,19 @@ class KrankileTyrant(KrankileStd):
         chosen = []
         bandwidth_used = 0
         for id_ in sorted_ids:
-            next_bw = int(math.ceil(self.upload_bws[id_]))
-            if self.up_bw <= bandwidth_used + next_bw:
+            next_bw = int(math.floor(self.upload_bws[id_]))
+            if self.up_bw < bandwidth_used + next_bw:
                 break
 
-            chosen.append((id_, next_bw))
+            chosen.append([id_, next_bw])
             bandwidth_used += next_bw
+
+        bw_left = self.up_bw - bandwidth_used
+        index = 0
+        while bw_left:
+            chosen[index % len(chosen)][1] += 1
+            bw_left -= 1
+            index += 1
 
         # create actual uploads out of the list of peer ids
         uploads = [Upload(self.id, peer_id, bw) for peer_id, bw in chosen]
