@@ -1,15 +1,22 @@
 #!/usr/bin/python
 import random
-import logging
 
-from operator import itemgetter
-from itertools import chain
 from collections import Counter
+from itertools import chain
 from messages import Upload, Request
 from util import even_split
 from peer import Peer
 
+
 class KrankileStd(Peer):
+    def post_init(self):
+        # To generalise the agent somewhat
+        self.normal_slots = 3
+        self.optimistic_unchoke_interval = 3
+
+        # To hold the peer that is currently being optimistically unchoked
+        self.optimistic_unchoke = None
+
     def requests(self, peers, history):
         """
         peers: available info about the peers (who has what pieces)
@@ -19,33 +26,36 @@ class KrankileStd(Peer):
 
         This will be called after update_pieces() with the most recent state.
         """
-        needed = lambda i: self.pieces[i] < self.conf.blocks_per_piece
-        needed_pieces = filter(needed, range(len(self.pieces)))
-        np_set = set(needed_pieces)  # sets support fast intersection ops.
-
-        # We'll put all the things we want here
-        requests = []
+        # Find all the pieces we ned
+        def needed(i): return self.pieces[i] < self.conf.blocks_per_piece
+        needed_pieces = set(filter(needed, range(len(self.pieces))))
 
         # Create a datastructure for tallying up what pieces are the most rare
         piece_counter = Counter()
-        for peer in peers: 
+        for peer in peers:
             av = set(peer.available_pieces)
-            av_needed = av.intersection(np_set)
+            av_needed = av.intersection(needed_pieces)
             piece_counter.update(av_needed)
-        
-        # Go through each peer and ask for the most rare pieces they have and we want
+
+        # List to keep all requests we want to send out
+        requests = []
+
+        # Go through each peer and ask for the n most rare pieces they have and we want
         for peer in peers:
             available_piece_set = set(peer.available_pieces)
-            isect = available_piece_set.intersection(np_set)
-            n = min(self.max_requests, len(isect))
-            
-            #
-            lisect = list(isect)
-            lisect = sorted(lisect, lambda p1, p2: piece_counter[p1] - piece_counter[p2])
-            for piece_id in lisect[:n]:
+            # We can only ask for pieces we (1) need and (2) the peer actually has
+            needed_and_available = available_piece_set.intersection(
+                needed_pieces)
+            # Check how many pieces we can maximally request
+            num_pieces = min(self.max_requests, len(needed_and_available))
+
+            # Sort the pieces based on how many peers actually have the piece, rarest first
+            rarest_first = sorted(
+                list(needed_and_available), lambda p1, p2: piece_counter[p1] - piece_counter[p2])
+            for piece_id in rarest_first[:num_pieces]:
                 start_block = self.pieces[piece_id]
-                r = Request(self.id, peer.id, piece_id, start_block)
-                requests.append(r)
+                request = Request(self.id, peer.id, piece_id, start_block)
+                requests.append(request)
 
         return requests
 
@@ -59,37 +69,50 @@ class KrankileStd(Peer):
 
         In each round, this will be called after requests().
         """
-        
-        round = history.current_round()
-        logging.debug("%s again.  It's round %d." % (
-            self.id, round))
-        # One could look at other stuff in the history too here.
-        # For example, history.downloads[round-1] (if round != 0, of course)
-        # has a list of Download objects for each Download to this peer in
-        # the previous round.
 
+        # No need to waste compute if there are no requests
         if len(requests) == 0:
-            logging.debug("No one wants my pieces!")
-            chosen = []
-            bws = []
             return []
 
+        # Initialize a counter to keep track of how much the agent downloaded from all other
+        # peers the last two rounds
         uploader_c = Counter()
         two_last = history.downloads[-2:]
         requester_ids = set(x.requester_id for x in requests)
+
+        # Iterate over all download objects that we recieved the previous two rounds
         for download in chain(*two_last):
+            # Only count the downloads that are from a peer that actually requested a piece from us
+            # requster_ids is a set so this operation is luckily O(1)
             if download.from_id in requester_ids:
-                uploader_c.update({download.from_id: download.blocks})    
+                uploader_c.update({download.from_id: download.blocks})
 
-        chosen = set(x[0] for x in uploader_c.most_common(min(len(requests),3)))
+        # Choose the n peers who uploaded most to us as the ones we are going to reciprocate
+        # Choose n to be the smaller of how many normal slots there are and how many requesters there are
+        chosen = set(x[0] for x in uploader_c.most_common(
+            min(len(requester_ids), self.normal_slots)))
         peer_ids = set(x.requester_id for x in requests).difference(chosen)
-        
-        if bool(peer_ids):
-            chosen.add(random.choice(list(peer_ids)))
-        # Evenly "split" my upload bandwidth among the one chosen requester
-        bws = even_split(self.up_bw, 4)
 
-        # create actual uploads out of the list of peer ids and bandwidths
-        uploads = [Upload(self.id, peer_id, bw) for (peer_id, bw) in zip(chosen, bws)]
-            
+        # If there still are peers left to unchoke
+        # Select a peer to optimistically unchoke if we either do not currently have unchoked anyone
+        # or if 3 rounds have passed
+        if bool(peer_ids) and (len(history.downloads) % self.optimistic_unchoke_interval == 0 or not self.optimistic_unchoke):
+            unchoke = random.choice(list(peer_ids))
+            self.optimistic_unchoke = unchoke
+
+        # Add the optimistically unchoked peer to the set
+        if self.optimistic_unchoke:
+            chosen.add(self.optimistic_unchoke)
+
+        # No need to go any further if no peers were chosen
+        if len(chosen) < 1:
+            return []
+
+        # Distribute as evenly as possible the bw across the chosen peer(s)
+        bws = even_split(self.up_bw, len(chosen))
+
+        # Create upload objects for the peer(s) with their respective allocated bandwidth(s)
+        uploads = [Upload(self.id, peer_id, bw)
+                   for (peer_id, bw) in zip(chosen, bws)]
+
         return uploads
